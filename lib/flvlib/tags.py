@@ -35,7 +35,18 @@ class Tag(object):
         self.parent_flv = parent_flv
         self.offset = None
         self.size = None
+        self.stream_id = 0
         self.timestamp = None
+        self.type = 0
+
+    def write(self, outfile):
+        outfile.write(make_ui8(self.type))
+        outfile.write(make_ui24(self.size))
+        outfile.write(make_si32_extended(self.timestamp))
+        outfile.write(make_ui24(self.stream_id))
+        self.write_tag_content(outfile)
+        outfile.write(make_ui32(self.previous_tag_size))
+
 
     def parse(self):
         f = self.f
@@ -60,17 +71,16 @@ class Tag(object):
         # correct position to read PreviousTagSize
         self.parse_tag_content()
 
-        previous_tag_size = get_ui32(f)
-        ensure(previous_tag_size, self.size + 11,
+        self.previous_tag_size = get_ui32(f)
+        ensure(self.previous_tag_size, self.size + 11,
                "PreviousTagSize of %d (0x%08X) "
                "not equal to actual tag size of %d (0x%08X)" %
-               (previous_tag_size, previous_tag_size,
+               (self.previous_tag_size, self.previous_tag_size,
                 self.size + 11, self.size + 11))
 
     def parse_tag_content(self):
         # By default just seek past the tag content
         self.f.seek(self.size, os.SEEK_CUR)
-
 
 class AudioTag(Tag):
 
@@ -137,13 +147,146 @@ class AudioTag(Tag):
                      aac_packet_type_to_string.get(self.aac_packet_type, '?')))
 
 
+
+
+
+class AVCDecoderConfigurationRecord():
+    def __init__(self, tag, f):
+        self.f = f
+        self.configurationVersion = 0
+        self.avcProfileIndication = 0
+        self.profileCompatibility = 0
+        self.avcLevelIndication = 0
+        self.reserved = 63
+        self.RLELength = 0
+        self.reserved2 = 7
+        self.numSPS = 0
+        self.sps = []
+        self.numPPS = 0
+        self.pps = []
+
+    def parse_tag_content(self):
+        self.configurationVersion = get_ui8(self.f)
+        self.avcProfileIndication = get_ui8(self.f)
+        self.profileCompatibility = get_ui8(self.f)
+        self.avcLevelIndication = get_ui8(self.f)
+        temp = get_ui8(self.f)
+        self.reserved = (temp >> 2) & 0x3F
+        self.RLELength = (temp & 0x3)
+        temp = get_ui8(self.f)
+        self.reserved2 = temp >> 5
+        self.numSPS = temp & 0x1F
+        print '{}'.format(self)
+        for i in xrange(self.numSPS):
+            sps = NALU(self, self.f)
+            sps.parse_tag_content(size_width=2)
+            self.sps.append(sps)
+        print '{}'.format(self.sps[0])
+        self.numPPS = get_ui8(self.f)
+        for i in xrange(self.numPPS):
+            pps = NALU(self, self.f)
+            pps.parse_tag_content(size_width=2)
+            self.pps.append(pps)
+        print '{}'.format(self.pps[0])
+
+    def write_tag_content(self, outfile):
+        outfile.write(make_ui8(self.configurationVersion))
+        outfile.write(make_ui8(self.avcProfileIndication))
+        outfile.write(make_ui8(self.profileCompatibility))
+        outfile.write(make_ui8(self.avcLevelIndication))
+        temp = (self.reserved << 2) | (self.RLELength & 0x3)
+        outfile.write(make_ui8(temp))
+        temp = self.reserved2 << 5 | (len(self.sps) & 0x3)
+        outfile.write(make_ui8(temp))
+        for sps in self.sps:
+            sps.write_tag_content(outfile, size_width=2)
+        outfile.write(make_ui8(len(self.pps)))
+        for pps in self.pps:
+            pps.write_tag_content(outfile, size_width=2)
+
+    def __repr__(self):
+        return "AVCDecoderConfigurationRecord: confVersion: {} profileIndication: {} \
+        profileComapt: {} avcLevel: {} RLELength: {} numSPS: {} numPPS: {}".format(self.configurationVersion,
+                                                                                   self.avcProfileIndication,
+                                                                                   self.profileCompatibility,
+                                                                                   self.avcLevelIndication,
+                                                                                   self.RLELength,
+                                                                                   self.numSPS,
+                                                                                   self.numPPS)
+
+class NALU(Tag):
+    def __init__(self, tag, f):
+        self.f = f;
+        self.size = 0;
+        self.type = 0;
+        self.data = 0;
+        self.offset = 0;
+
+    def write_tag_content(self, outfile, size_width=4):
+        if (size_width == 1):
+            outfile.write(make_ui8(self.size))
+        elif (size_width == 2):
+            outfile.write(make_ui16(self.size))
+        elif (size_width == 3):
+            outfile.write(make_ui24(self.size))
+        elif (size_width == 4):
+            outfile.write(make_ui32(self.size))
+
+        outfile.write(self.data)
+
+    def parse_tag_content(self, size_width=4):
+        self.offset = self.f.tell()
+        if size_width == 1:
+            self.size = get_ui8(self.f)
+        elif size_width == 2:
+            self.size = get_ui16(self.f)
+        elif size_width == 3:
+            self.size = get_ui24(self.f)
+        elif size_width == 4:
+            self.size = get_ui32(self.f)
+
+        print "NALU Size {} {}".format(self.size, self.offset)
+        self.data = self.f.read(self.size)
+        print "Data len {} {}".format(len(self.data), self.offset)
+        self.type = int(struct.unpack('B', self.data[0])[0]) & 31
+
+    def __repr__(self):
+        if self.type == 2:
+            return "NALU P-Frame {} {}".format(self.size, self.offset)
+        if self.type == 5:
+            return "NALU I-Frame {} {}".format(self.size, self.offset)
+        if self.type == 7:
+            return "NALU SPS {} {}".format(self.size, self.offset)
+        if self.type == 8:
+            return "NALU PPS {} {}".format(self.size, self.offset)
+        if self.type == 9:
+            return "NALU AUD {} {}".format(self.size, self.offset)
+
+        return "NALU {} {}".format(self.type, self.size, self.offset)
+
 class VideoTag(Tag):
 
     def __init__(self, parent_flv, f):
         Tag.__init__(self, parent_flv, f)
         self.frame_type = None
         self.codec_id = None
+        self.nalus = []
         self.h264_packet_type = None # Always None for non-H.264 tags
+
+    def write_tag_content(self, outfile):
+        temp = (self.frame_type << 4) | self.codec_id
+        print "Temp: {} {} {}".format(temp, self.frame_type, self.codec_id)
+        outfile.write(make_ui8(temp))
+        if self.codec_id == CODEC_ID_H264:
+            outfile.write(make_ui8(self.h264_packet_type))
+            outfile.write(make_ui24(self.composition_time))
+            if (self.h264_packet_type == 1):
+                for nalu in self.nalus:
+                    nalu.write_tag_content(outfile)
+            else:
+                self.configurationRecord.write_tag_content(outfile)
+
+
 
     def parse_tag_content(self):
         f = self.f
@@ -159,6 +302,28 @@ class VideoTag(Tag):
             # ends.
             self.h264_packet_type = get_ui8(f)
             read_bytes += 1
+
+            self.composition_time = get_ui24(f)
+            read_bytes += 3
+
+            self.avc_header_offset = self.offset + 16
+            self.frame_offset = self.avc_header_offset
+            self.data_size = self.size - 5
+            if (self.h264_packet_type == 1):
+                self.nalus = []
+                bytesRead = 0
+                while bytesRead < self.data_size - 16:
+                    nal = NALU(self, f)
+                    nal.parse_tag_content()
+                    print "Read {} expected {}".format(bytesRead, self.data_size)
+                    bytesRead += nal.size
+                    read_bytes += nal.size
+                    self.nalus.append(nal)
+            else:
+                print "Parsing AVCConfiguration"
+                self.configurationRecord = AVCDecoderConfigurationRecord(self, self.f)
+                self.configurationRecord.parse_tag_content()
+
 
         if strict_parser():
             try:
@@ -176,8 +341,6 @@ class VideoTag(Tag):
                 raise MalformedFLV("Invalid H.264 packet type: %d",
                                    self.h264_packet_type)
 
-        f.seek(self.size - read_bytes, os.SEEK_CUR)
-
     def __repr__(self):
         if self.offset is None:
             return "<VideoTag unparsed>"
@@ -192,8 +355,7 @@ class VideoTag(Tag):
                     (self.offset, self.timestamp, self.size,
                      codec_id_to_string.get(self.codec_id, '?'),
                      frame_type_to_string.get(self.frame_type, '?'),
-                     h264_packet_type_to_string.get(
-                        self.h264_packet_type, '?')))
+                     self.nalus))
 
 
 class ScriptTag(Tag):
@@ -332,7 +494,7 @@ class FLV(object):
 
         tag_klass = self.tag_type_to_class(tag_type)
         tag = tag_klass(self, f)
-
+        tag.type = tag_type
         tag.parse()
 
         return tag
@@ -341,7 +503,7 @@ class FLV(object):
         try:
             return tag_to_class[tag_type]
         except KeyError:
-            raise MalformedFLV("Invalid tag type: %d", tag_type)
+            raise MalformedFLV("Invalid tag type: %d at offset {}", tag_type, self.f.tell())
 
 
 def create_flv_tag(type, data, timestamp=0):
