@@ -6,10 +6,14 @@ from primitives import *
 from constants import *
 from astypes import MalformedFLV
 from astypes import get_script_data_variable, make_script_data_variable
+from bitstring import BitStream
 
 log = logging.getLogger('flvlib.tags')
 
 STRICT_PARSING = False
+
+frame_num_width = 4;
+
 def strict_parser():
     return globals()['STRICT_PARSING']
 
@@ -25,7 +29,7 @@ def ensure(value, expected, error_msg):
     if strict_parser():
         raise MalformedFLV(error_msg)
     else:
-        log.warning('Skipping non-conformant value in FLV file')
+        log.warning(error_msg)
 
 
 class Tag(object):
@@ -118,6 +122,8 @@ class AudioTag(Tag):
                    "AAC sound format with incorrect sound type: %d" %
                    self.sound_type)
 
+        self.frame_offset = self.offset + 12
+
         if strict_parser():
             try:
                 sound_format_to_string[self.sound_format]
@@ -176,18 +182,15 @@ class AVCDecoderConfigurationRecord():
         temp = get_ui8(self.f)
         self.reserved2 = temp >> 5
         self.numSPS = temp & 0x1F
-        print '{}'.format(self)
         for i in xrange(self.numSPS):
-            sps = NALU(self, self.f)
+            sps = SPS(self, self.f)
             sps.parse_tag_content(size_width=2)
             self.sps.append(sps)
-        print '{}'.format(self.sps[0])
         self.numPPS = get_ui8(self.f)
         for i in xrange(self.numPPS):
             pps = NALU(self, self.f)
             pps.parse_tag_content(size_width=2)
             self.pps.append(pps)
-        print '{}'.format(self.pps[0])
 
     def write_tag_content(self, outfile):
         outfile.write(make_ui8(self.configurationVersion))
@@ -213,6 +216,7 @@ class AVCDecoderConfigurationRecord():
                                                                                    self.RLELength,
                                                                                    self.numSPS,
                                                                                    self.numPPS)
+
 
 class NALU(Tag):
     def __init__(self, tag, f):
@@ -245,16 +249,25 @@ class NALU(Tag):
         elif size_width == 4:
             self.size = get_ui32(self.f)
 
-        print "NALU Size {} {}".format(self.size, self.offset)
         self.data = self.f.read(self.size)
-        print "Data len {} {}".format(len(self.data), self.offset)
-        self.type = int(struct.unpack('B', self.data[0])[0]) & 31
+        s = BitStream('0x' + self.data.encode('hex'))
+        self.forbidden_bit = s.read('uint:1')
+        self.nal_ref_idc = s.read('uint:2')
+        self.nal_unit_type = s.read('uint:5')
+        self.type = self.nal_unit_type
+        #self.type = int(struct.unpack('B', self.data[0])[0]) & 31
+        if (self.type == 1 or self.type == 5):
+            #s = BitStream('0x' + self.data[1:].encode('hex'))
+            self.first_mb_in_slice = s.read('ue')
+            self.slice_type = s.read('ue')
+            self.pic_parameter_set_id = s.read('ue')
+            self.frame_num = s.read('uint:{}'.format(frame_num_width))
 
     def __repr__(self):
-        if self.type == 2:
-            return "NALU P-Frame {} {}".format(self.size, self.offset)
+        if self.type == 1:
+            return "NALU P-Frame {} {} #{}".format(self.size, self.offset, self.frame_num)
         if self.type == 5:
-            return "NALU I-Frame {} {}".format(self.size, self.offset)
+            return "NALU I-Frame {} {} #{}".format(self.size, self.offset, self.frame_num)
         if self.type == 7:
             return "NALU SPS {} {}".format(self.size, self.offset)
         if self.type == 8:
@@ -263,6 +276,125 @@ class NALU(Tag):
             return "NALU AUD {} {}".format(self.size, self.offset)
 
         return "NALU {} {}".format(self.type, self.size, self.offset)
+
+
+CROP_LEFT = 0
+CROP_RIGHT = 1
+CROP_TOP = 2
+CROP_BOTTOM = 3
+class SPS(NALU):
+    chroma_profiles = [100, 110, 122, 244, 44, 83, 86, 118, 128, 134, 138, 139]
+    parsed = False
+    forbidden_bit = -1
+    nal_ref_idc = -1
+    nal_unit_type = -1
+    profile_idc = -1
+    constraint_flags = []
+    reserved_bits = -1
+    level_idc = -1
+    seq_parameter_set_id = -1
+    log2_max_frame_num_minus4 = -1
+    pic_order_cnt_type = -1
+    log2_max_pic_order_cnt_lsb_minus4 = -1
+    num_ref_frames = -1
+    gaps_in_frame_num_value_allowed_flag = -1
+    frame_mbs_only_flag = -1
+    direct_8x8_inference_flag = -1
+    frame_cropping_flag = -1
+    vui_prameters_present_flag = -1
+    rbsp_stop_one_bit = -1
+    chroma_format_idc = -1
+    separate_color_plane_flag = -1
+    bit_depth_luma_minus8 = -1
+    bit_depth_chroma_minus8 = -1
+    qpprime_y_zero_transform_bypass_flag = -1
+    seq_scaling_matrix_present_flag = -1
+    sequence_scaling_list = []
+    delta_pic_order_always_zero_flag = -1
+    offset_for_non_ref_pic = -1
+    offset_for_top_to_bottom_field = -1
+    num_ref_frames_in_pic_order_cnt_cycle = -1
+    offsets_for_ref_frame = -1
+    max_num_ref_frames = -1
+    pic_width_in_mbs_minus1 = -1
+    pic_height_in_map_units_minus1 = -1
+    mb_adaptive_frame_field_flag = -1
+    frame_crop_offsets = []
+    vui_parameters_present_flag = -1
+
+    def __init__(self, tag, f):
+        NALU.__init__(self, tag, f)
+
+    def parse_sps_data(self):
+        s = BitStream('0x' + self.data.encode('hex'))
+        self.forbidden_bit = s.read('uint:1')
+        self.nal_ref_idc = s.read('uint:2')
+        self.nal_unit_type = s.read('uint:5')
+        self.profile_idc = s.read('uint:8')
+        self.constraint_flags = s.readlist('4*uint:1')
+        self.reserved_bits = s.read('uint:4')
+        self.level_idc = s.read('uint:8')
+        self.seq_parameter_set_id = s.read('ue')
+        if self.profile_idc in self.chroma_profiles:
+            self.chroma_format_idc = s.read('ue')
+            if self.chroma_format_idc == 3:
+                self.separate_color_plane_flag = s.read('uint:1')
+            self.bit_depth_luma_minus8 = s.read('ue')
+            self.bit_depth_chroma_minus8 = s.read('ue')
+            self.qpprime_y_zero_transform_bypass_flag = s.read('uint:1')
+            self.seq_scaling_matrix_present_flag = s.read('uint:1')
+            if self.seq_scaling_matrix_present_flag:
+                seq_scaling_list_present = s.read('uint:1')
+                scaling_list_count = 12 if self.chroma_format_idc == 3 else 8
+                for i in xrange(scaling_list_count):
+                    if seq_scaling_list_present:
+                        last_scale = 8
+                        next_scale = 8
+                        list_size = 16 if i < 6 else 64
+                        for j in xrange(list_size):
+                            delta_scale = s.read('ue')
+
+        self.log2_max_frame_num_minus4 = s.read('ue')
+        self.log2_max_frame_num = self.log2_max_frame_num_minus4 + 4
+        frame_num_width = self.log2_max_frame_num;
+        self.pic_order_cnt_type = s.read('ue')
+        if self.pic_order_cnt_type == 0:
+            self.log2_max_pic_order_cnt_lsb_minus4 = s.read('ue')
+        elif self.pic_order_cnt_type == 1:
+            self.delta_pic_order_always_zero_flag = s.read('uint:1')
+            self.offset_for_non_ref_pic = s.read('se')
+            self.offset_for_top_to_bottom_field = s.read('se')
+            self.num_ref_frames_in_pic_order_cnt_cycle = s.read('ue')
+            self.offsets_for_ref_frame = s.readlist('4*')
+
+        self.max_num_ref_frames = s.read('ue')
+        self.gaps_in_frame_num_value_allowed_flag = s.read('uint:1')
+        self.pic_width_in_mbs_minus1 = s.read('ue')
+        self.pic_height_in_map_units_minus1 = s.read('ue')
+        self.frame_mbs_only_flag = s.read('uint:1')
+        if self.frame_mbs_only_flag == 0:
+            self.mb_adaptive_frame_field_flag = s.read('uint:1')
+        self.direct_8x8_inference_flag = s.read('uint:1')
+        self.frame_cropping_flag = s.read('uint:1')
+        self.frame_crop_offsets = s.readlist('4*ue')
+        self.vui_parameters_present_flag = s.read('uint:1')
+        self.width = 16 * (self.pic_width_in_mbs_minus1 + 1)
+        self.height = 16 * (2 - self.frame_mbs_only_flag) * (self.pic_height_in_map_units_minus1 + 1)
+
+        if self.separate_color_plane_flag or self.chroma_format_idc == 0:
+            self.frame_crop_offsets[CROP_BOTTOM] = self.frame_crop_offsets[CROP_BOTTOM] * ( 2 - self.frame_mbs_only_flag)
+            self.frame_crop_offsets[CROP_TOP] = self.frame_crop_offsets[CROP_TOP] * (2 - self.frame_mbs_only_flag)
+        elif not self.separate_color_plane_flag and self.chroma_format_idc > 0:
+            if self.chroma_format_idc == 1 or self.chroma_format_idc == 2:
+                self.frame_crop_offsets[CROP_LEFT] = self.frame_crop_offsets[CROP_LEFT] * 2
+                self.frame_crop_offsets[CROP_RIGHT] = self.frame_crop_offsets[CROP_RIGHT] * 2
+
+            if self.chroma_format_idc == 1:
+                self.frame_crop_offsets[CROP_TOP] = self.frame_crop_offsets[CROP_TOP] * 2
+                self.frame_crop_offsets[CROP_BOTTOM] = self.frame_crop_offsets[CROP_BOTTOM] * 2
+
+        self.width = self.width - (self.frame_crop_offsets[CROP_LEFT] + self.frame_crop_offsets[CROP_RIGHT])
+        self.height = self.height - (self.frame_crop_offsets[CROP_TOP] + self.frame_crop_offsets[CROP_BOTTOM])
 
 class VideoTag(Tag):
 
@@ -275,7 +407,6 @@ class VideoTag(Tag):
 
     def write_tag_content(self, outfile):
         temp = (self.frame_type << 4) | self.codec_id
-        print "Temp: {} {} {}".format(temp, self.frame_type, self.codec_id)
         outfile.write(make_ui8(temp))
         if self.codec_id == CODEC_ID_H264:
             outfile.write(make_ui8(self.h264_packet_type))
@@ -311,16 +442,17 @@ class VideoTag(Tag):
             self.data_size = self.size - 5
             if (self.h264_packet_type == 1):
                 self.nalus = []
-                bytesRead = 0
-                while bytesRead < self.data_size - 16:
-                    nal = NALU(self, f)
-                    nal.parse_tag_content()
-                    print "Read {} expected {}".format(bytesRead, self.data_size)
-                    bytesRead += nal.size
-                    read_bytes += nal.size
-                    self.nalus.append(nal)
+                if self.parent_flv.encrypted:
+                    f.seek(self.data_size, os.SEEK_CUR)
+                else:
+                    bytesRead = 0
+                    while bytesRead < self.data_size - 12:
+                        nal = NALU(self, f)
+                        nal.parse_tag_content()
+                        bytesRead += nal.size
+                        read_bytes += nal.size
+                        self.nalus.append(nal)
             else:
-                print "Parsing AVCConfiguration"
                 self.configurationRecord = AVCDecoderConfigurationRecord(self, self.f)
                 self.configurationRecord.parse_tag_content()
 
@@ -367,30 +499,11 @@ class ScriptTag(Tag):
 
     def parse_tag_content(self):
         f = self.f
+        self.data = f.read(self.size)
 
-        # Here there's always a byte with the value of 0x02,
-        # which means "string", although the spec says NOTHING
-        # about it..
-        value_type = get_ui8(f)
-        ensure(value_type, 2, "The name of a script tag is not a string")
 
-        # Need to pass the tag end offset, because apparently YouTube
-        # doesn't give a *shit* about the FLV spec and just happily
-        # ends the onMetaData tag after self.size bytes, instead of
-        # ending it with the *required* 0x09 marker. Bastards!
-
-        if strict_parser():
-            # If we're strict, just don't pass this info
-            tag_end = None
-        else:
-            # 11 = tag type (1) + data size (3) + timestamp (4) + stream id (3)
-            tag_end = self.offset + 11 + self.size
-            log.debug("max offset is 0x%08X", tag_end)
-
-        self.name, self.variable = \
-                   get_script_data_variable(f, max_offset=tag_end)
-        log.debug("A script tag with a name of %s and value of %r",
-                  self.name, self.variable)
+    def write_tag_content(self, outfile):
+        outfile.write(self.data)
 
     def __repr__(self):
         if self.offset is None:
@@ -420,11 +533,12 @@ tag_to_class = {
 
 class FLV(object):
 
-    def __init__(self, f):
+    def __init__(self, f, **kwargs):
         self.f = f
         self.version = None
         self.has_audio = None
         self.has_video = None
+        self.encrypted = kwargs.get('encrypted', False)
         self.tags = []
 
     def parse_header(self):
@@ -503,7 +617,7 @@ class FLV(object):
         try:
             return tag_to_class[tag_type]
         except KeyError:
-            raise MalformedFLV("Invalid tag type: %d at offset {}", tag_type, self.f.tell())
+            raise MalformedFLV("Invalid tag type: %d at offset {} (Size: {})", tag_type, self.f.tell())
 
 
 def create_flv_tag(type, data, timestamp=0):
