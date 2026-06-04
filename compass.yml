@@ -1,0 +1,8 @@
+name: flvlib
+id: ari:cloud:compass:4337fc0d-aa55-4ff9-bd75-ef7117ff9381:component/4c6fdffe-fa4a-46ef-9e6f-a1aa05480c89/3bec86cc-feb5-411b-8f6c-dd83ed5175b2
+configVersion: 1
+typeId: LIBRARY
+ownerId: ari:cloud:identity::team/02623aed-f05b-4acd-8187-7932552722de-21 # Video - Media (251)
+links:
+  - type: REPOSITORY
+    url: https://github.com/EENCloud/flvlib
